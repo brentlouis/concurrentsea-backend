@@ -9,6 +9,16 @@ import random
 
 app = FastAPI(title="ConcurrentSea")
 
+from fastapi.middleware.cors import CORSMiddleware
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 def release_expired_holds(conn) -> int:
     conn.execute(text("""
         UPDATE bookings b
@@ -182,7 +192,7 @@ def require_admin(user = Depends(current_user)):
     if user["role"] != "ADMIN":
         raise HTTPException(403, "Admin access required")
     return user
-    
+
 
 @app.post("/api/admin/release-holds")
 def force_release(admin = Depends(require_admin)):
@@ -562,3 +572,14 @@ def cancel(booking_id: int, user = Depends(current_user)):
     return {"bookingId": booking_id, "status": "CANCELLED",
             "cancelledAt": cancelled["cancelled_at"].isoformat()}
 
+
+# ... every @app route above ...
+
+import os
+from fastapi.staticfiles import StaticFiles
+
+if os.path.isdir("dev-ui"):
+    app.mount("/dev-ui", StaticFiles(directory="dev-ui", html=True), name="dev-ui")
+
+if os.path.isdir("static"):
+    app.mount("/", StaticFiles(directory="static", html=True), name="static")

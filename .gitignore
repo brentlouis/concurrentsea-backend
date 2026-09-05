@@ -2,3 +2,5 @@ venv/
 __pycache__/
 .env
 *.pyc
+port.ps1
+dev-ui/
