@@ -19,6 +19,24 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+from fastapi import Request
+from fastapi.responses import JSONResponse
+
+ERROR_CODES = {
+    400: "BAD_REQUEST", 401: "UNAUTHORIZED", 403: "FORBIDDEN",
+    404: "NOT_FOUND", 409: "CONFLICT", 410: "GONE",
+}
+
+@app.exception_handler(HTTPException)
+def http_error(request: Request, exc: HTTPException):
+    code = ERROR_CODES.get(exc.status_code, "ERROR")
+    if exc.status_code == 409 and "seat" in str(exc.detail).lower():
+        code = "SEAT_TAKEN"
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"error": code, "message": exc.detail},
+    )
+
 def release_expired_holds(conn) -> int:
     conn.execute(text("""
         UPDATE bookings b
@@ -94,8 +112,9 @@ class UserPatch(BaseModel):
 # schedules 
 
 @app.get("/api/schedules")
-def list_schedules():
-    sql = text("""
+def list_schedules(origin: str | None = None, destination: str | None = None,
+                   date: str | None = None, minSeats: int | None = None):
+    sql = """
         SELECT s.id,
                s.origin,
                s.destination,
@@ -109,10 +128,25 @@ def list_schedules():
                  WHERE schedule_id = s.id AND status = 'AVAILABLE') AS "availableSeats"
         FROM schedules s
         WHERE s.status = 'SCHEDULED'
-        ORDER BY s.departure_time
-    """)
+    """
+    params = {}
+    if origin:
+        sql += " AND s.origin ILIKE :origin"
+        params["origin"] = f"%{origin}%"
+    if destination:
+        sql += " AND s.destination ILIKE :dest"
+        params["dest"] = f"%{destination}%"
+    if date:
+        sql += " AND s.departure_time::date = :date"
+        params["date"] = date
+    if minSeats:
+        sql += """ AND (SELECT count(*) FROM seats
+                         WHERE schedule_id = s.id AND status = 'AVAILABLE') >= :minSeats"""
+        params["minSeats"] = minSeats
+    sql += " ORDER BY s.departure_time"
+
     with engine.connect() as conn:
-        rows = conn.execute(sql).mappings().all()
+        rows = conn.execute(text(sql), params).mappings().all()
     return [dict(r) for r in rows]
 
 
@@ -136,6 +170,30 @@ def seat_map(schedule_id: int):
         """), {"id": schedule_id}).mappings().all()
 
     return {"scheduleId": schedule_id, "seats": [dict(r) for r in rows]}
+
+
+@app.get("/api/schedules/{schedule_id}")
+def get_schedule(schedule_id: int):
+    with engine.connect() as conn:
+        row = conn.execute(text("""
+            SELECT s.id,
+                   s.origin,
+                   s.destination,
+                   s.departure_time AS "departureTime",
+                   s.arrival_time   AS "arrivalTime",
+                   s.vessel_name    AS "vesselName",
+                   s.price,
+                   s.total_seats    AS "totalSeats",
+                   s.status,
+                   (SELECT count(*) FROM seats
+                     WHERE schedule_id = s.id AND status = 'AVAILABLE') AS "availableSeats"
+            FROM schedules s
+            WHERE s.id = :id
+        """), {"id": schedule_id}).mappings().first()
+
+    if not row:
+        raise HTTPException(404, "Schedule not found")
+    return dict(row)
 
 # auth
 
@@ -571,6 +629,21 @@ def cancel(booking_id: int, user = Depends(current_user)):
 
     return {"bookingId": booking_id, "status": "CANCELLED",
             "cancelledAt": cancelled["cancelled_at"].isoformat()}
+
+
+# reset database
+
+@app.post("/api/admin/reset-demo")
+def reset_demo(admin = Depends(require_admin)):
+    with engine.begin() as conn:
+        conn.execute(text("DELETE FROM booking_attempts"))
+        conn.execute(text("DELETE FROM payments"))
+        conn.execute(text("DELETE FROM bookings"))
+        result = conn.execute(text("""
+            UPDATE seats
+            SET status='AVAILABLE', held_by=NULL, held_until=NULL, version=0
+        """))
+    return {"reset": True, "seatsReleased": result.rowcount}
 
 
 # ... every @app route above ...
